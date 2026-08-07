@@ -17,7 +17,7 @@ User ⇄ A2UI renderer ⇄ Agent loop ⇄ Session state
 - **Agent loop, not a pipeline.** Search, shortlist, and compare are tools the agent calls *repeatedly* as the user revises constraints ("actually, under ₹15 lakh", "anything hybrid?").
 - **Session state is shared, not a stage.** Every tool reads and writes one versioned session object — the payment app knows the budget the interview captured.
 - **Two UI paradigms, one surface.** A2UI renders agent-driven dynamic UI (interview progress, catalogue, compare table, reasoning steps). MCP Apps render the two mandatory server-owned interfaces: booking form and mock payment.
-- **Hybrid ranking.** Deterministic filter + score narrows ~100 listings to a shortlist of ≤10; the agent ranks and explains those. The explanations are real reasoning, not post-hoc narration.
+- **Hybrid ranking.** Deterministic filter + score narrows the marketplace to a shortlist of ≤10; the agent ranks and explains those. The explanations are real reasoning, not post-hoc narration.
 - **Compare/hold garage.** Users hold multiple cars, compare them side by side, and take one through checkout at a time.
 
 ## Running
@@ -34,18 +34,27 @@ pip install -r backend/requirements.txt
 cd backend && python -m uvicorn app.main:app --reload
 ```
 
+The marketplace dataset generates itself on first run. To materialise or inspect it directly:
+
+```bash
+python data/generate_listings.py     # deterministic, seeded
+python data/validate_listings.py     # asserts the FR-6 floor
+```
+
 Tests (includes validating every emitted A2UI envelope against Google's real v0.9.1 spec schemas):
 
 ```bash
-bash research/fetch_schemas.sh          # pulls A2UI spec schemas (pinned source)
+bash research/fetch_schemas.sh       # pulls A2UI spec schemas (pinned source)
 cd backend && python -m pytest tests/
 ```
 
 ## Status
 
-✅ **M1 — walking skeleton** (current): chat loop, versioned session state, interview driven by unfilled intent slots, live A2UI progress surface (`createSurface`/`updateComponents`/`updateDataModel`), and an MCP App booking form rendering in a sandboxed iframe with a JSON-RPC `tools/call` round trip. Type `/book demo-listing` in the chat to exercise the MCP App path.
+✅ **M1 — walking skeleton.** Chat loop, versioned session state, interview driven by unfilled intent slots, live A2UI progress surface, and an MCP App booking form in a sandboxed iframe with a JSON-RPC `tools/call` round trip. Type `/book demo-listing` to exercise the MCP App path.
 
-🚧 Next — **M2**: mock marketplace (≥100 listings, validated in CI), `search` + `shortlist` tools, Claude Agent SDK replacing the scripted interview agent.
+✅ **M2 — marketplace (partial).** Seeded generator producing 388 listings across 12 categories with ≥10 brands in every category, a validator enforcing the FR-6 floor, `search_listings` (pure filter, returns a relaxation hint instead of dead-ending on zero results) and `shortlist_candidates` (deterministic scoring with a per-candidate breakdown). A completed interview now runs search → shortlist and renders a ranked A2UI catalogue.
+
+🚧 **Next.** Swap `ScriptedAgent` for the Claude Agent SDK so ranking and per-car rationale come from the model rather than a score readout (the deterministic shortlist stays — that split is the point). Then M3 garage/compare, M4 payment MCP App, M5 observability + ship.
 
 Milestones: [`plan.md §5`](specs/001-car-matchmaker/plan.md).
 
@@ -65,12 +74,18 @@ This project is built spec-first (GitHub spec-kit conventions). The spec artifac
 
 | Requirement | Where |
 |---|---|
-| Interactive in-UI interview | Agent loop, interview phase (spec FR-1) — **live in M1** |
-| Research + ranked, explained suggestions | `search` + `shortlist` tools + agent ranking (spec FR-2, FR-3) |
-| **MCP Apps: form filling + mock payment (mandatory)** | `open_booking_form` (**live in M1**) and `open_payment` MCP Apps (contracts §5, §6) |
-| Dynamic UI via A2UI | A2UI v0.9.1 renderer — envelopes spec-schema-validated in tests — **live in M1** |
-| Mock marketplace ≥100 listings / ≥10 categories / ≥10 brands per category | `data/listings.json` + CI validator (spec FR-6) |
-| Multistep agent memory | Versioned session state (data-model.md) — **live in M1** |
-| Agent harness | Claude Agent SDK (plan §2, lands M2) |
-| Docker / deployed | `docker compose up` — **live in M1** |
+| Interactive in-UI interview | Agent loop, interview phase (spec FR-1) — **live** |
+| Research + ranked, explained suggestions | `search_listings` + `shortlist_candidates` + agent ranking (FR-2, FR-3) — **deterministic half live** |
+| **MCP Apps: form filling + mock payment (mandatory)** | `open_booking_form` (**live**) and `open_payment` (contracts §5, §6) |
+| Dynamic UI via A2UI | A2UI v0.9.1 renderer, envelopes spec-schema-validated in tests — **live** |
+| Mock marketplace ≥100 listings / ≥10 categories / ≥10 brands per category | `data/generate_listings.py` + `data/validate_listings.py` — **live (388 / 12 / ≥10)** |
+| Multistep agent memory | Versioned session state (data-model.md) — **live** |
+| Agent harness | Claude Agent SDK (plan §2) |
+| Docker / deployed | `docker compose up` — **live** |
 | Bonus: observability | Langfuse via OpenTelemetry (plan §6) |
+
+## Notes
+
+- `data/listings.json` is git-ignored: the generator is seeded and deterministic, so the dataset is reproduced byte-for-byte rather than committed twice. A test asserts generator output matches the materialised file.
+- BMW Group marques are deliberately absent from the mock data — the brief puts BMW APIs out of scope, and keeping the badge out avoids ambiguity.
+- CI workflow (`.github/workflows/ci.yml`) is not committed: creating workflow files needs a token scope this project's GitHub connection lacks. The workflow would run `research/fetch_schemas.sh` then `pytest`.
