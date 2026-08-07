@@ -20,6 +20,35 @@ User ⇄ A2UI renderer ⇄ Agent loop ⇄ Session state
 - **Hybrid ranking.** Deterministic filter + score narrows ~100 listings to a shortlist of ≤10; the agent ranks and explains those. The explanations are real reasoning, not post-hoc narration.
 - **Compare/hold garage.** Users hold multiple cars, compare them side by side, and take one through checkout at a time.
 
+## Running
+
+```bash
+docker compose up
+# → http://localhost:8000
+```
+
+or locally:
+
+```bash
+pip install -r backend/requirements.txt
+cd backend && python -m uvicorn app.main:app --reload
+```
+
+Tests (includes validating every emitted A2UI envelope against Google's real v0.9.1 spec schemas):
+
+```bash
+bash research/fetch_schemas.sh          # pulls A2UI spec schemas (pinned source)
+cd backend && python -m pytest tests/
+```
+
+## Status
+
+✅ **M1 — walking skeleton** (current): chat loop, versioned session state, interview driven by unfilled intent slots, live A2UI progress surface (`createSurface`/`updateComponents`/`updateDataModel`), and an MCP App booking form rendering in a sandboxed iframe with a JSON-RPC `tools/call` round trip. Type `/book demo-listing` in the chat to exercise the MCP App path.
+
+🚧 Next — **M2**: mock marketplace (≥100 listings, validated in CI), `search` + `shortlist` tools, Claude Agent SDK replacing the scripted interview agent.
+
+Milestones: [`plan.md §5`](specs/001-car-matchmaker/plan.md).
+
 ## Spec-driven development
 
 This project is built spec-first (GitHub spec-kit conventions). The spec artifacts are the source of truth:
@@ -30,28 +59,18 @@ This project is built spec-first (GitHub spec-kit conventions). The spec artifac
 | [`specs/001-car-matchmaker/plan.md`](specs/001-car-matchmaker/plan.md) | How — architecture, stack, UI paradigm split, milestones |
 | [`specs/001-car-matchmaker/data-model.md`](specs/001-car-matchmaker/data-model.md) | Session state schema (the agent's memory) |
 | [`specs/001-car-matchmaker/contracts/tools.md`](specs/001-car-matchmaker/contracts/tools.md) | The six tool contracts |
+| [`specs/001-car-matchmaker/research.md`](specs/001-car-matchmaker/research.md) | Protocol facts verified from primary sources (A2UI v0.9.1, MCP Apps) |
 
 ## Hackathon requirements mapping
 
 | Requirement | Where |
 |---|---|
-| Interactive in-UI interview | Agent loop, interview phase (spec FR-1) |
+| Interactive in-UI interview | Agent loop, interview phase (spec FR-1) — **live in M1** |
 | Research + ranked, explained suggestions | `search` + `shortlist` tools + agent ranking (spec FR-2, FR-3) |
-| **MCP Apps: form filling + mock payment (mandatory)** | `open_booking_form` and `open_payment` MCP Apps (contracts §5, §6) |
-| Dynamic UI via A2UI | A2UI renderer for catalogue, progress, reasoning (plan §3) |
+| **MCP Apps: form filling + mock payment (mandatory)** | `open_booking_form` (**live in M1**) and `open_payment` MCP Apps (contracts §5, §6) |
+| Dynamic UI via A2UI | A2UI v0.9.1 renderer — envelopes spec-schema-validated in tests — **live in M1** |
 | Mock marketplace ≥100 listings / ≥10 categories / ≥10 brands per category | `data/listings.json` + CI validator (spec FR-6) |
-| Multistep agent memory | Session state (data-model.md) |
-| Agent harness | Claude Agent SDK (plan §2) |
-| Docker / deployed | Docker Compose (plan §2, milestone M5) |
+| Multistep agent memory | Versioned session state (data-model.md) — **live in M1** |
+| Agent harness | Claude Agent SDK (plan §2, lands M2) |
+| Docker / deployed | `docker compose up` — **live in M1** |
 | Bonus: observability | Langfuse via OpenTelemetry (plan §6) |
-
-## Status
-
-🚧 **Spec phase complete — implementation starting.** Milestones tracked in [`plan.md §5`](specs/001-car-matchmaker/plan.md).
-
-## Running (placeholder)
-
-```bash
-# lands with milestone M1
-docker compose up
-```
