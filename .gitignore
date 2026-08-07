@@ -13,3 +13,4 @@ build/
 .pytest_cache/
 .ruff_cache/
 research/a2ui-schemas/
+data/listings.json
