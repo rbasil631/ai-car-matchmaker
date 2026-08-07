@@ -140,6 +140,41 @@ def interview_progress_messages(state: dict[str, Any], first_time: bool) -> list
     return msgs
 
 
+RESULTS_SURFACE = "results"
+
+
+def results_messages(cards: list[dict[str, Any]], considered: int) -> list[dict[str, Any]]:
+    """Catalogue surface (FR-8). Rebuilt per search: a revised query is a new
+    result set, and deleteSurface + createSurface is the spec's way to say that.
+
+    Each card is {listing_id, title, price, meta, why} — `why` is the score
+    rationale, so the reasoning the user sees is the reasoning that ranked it.
+    """
+    components: list[dict[str, Any]] = []
+    card_ids: list[str] = []
+    for i, c in enumerate(cards):
+        t, p, m, w = f"c{i}-title", f"c{i}-price", f"c{i}-meta", f"c{i}-why"
+        components.append(text(t, c["title"], variant="h5"))
+        components.append(text(p, c["price"], variant="body"))
+        components.append(text(m, c["meta"], variant="caption"))
+        components.append(text(w, c["why"], variant="caption"))
+        components.append(column(f"c{i}-col", [t, p, m, w]))
+        components.append(card(f"c{i}", f"c{i}-col"))
+        card_ids.append(f"c{i}")
+
+    heading = (f"Top {len(cards)} of {considered} matches"
+               if cards else "No matches — let's adjust the search")
+    components.append(text("res-title", heading, variant="h3"))
+    components.append(column("res-list", card_ids))
+    components.append(column("res-root", ["res-title", "res-list"]))
+
+    return [
+        delete_surface(RESULTS_SURFACE),
+        create_surface(RESULTS_SURFACE),
+        update_components(RESULTS_SURFACE, components),
+    ]
+
+
 def _fmt_date(value: Any) -> str:
     if value is None:
         return "…"
