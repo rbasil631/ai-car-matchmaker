@@ -1,10 +1,10 @@
-"""Agent loop for M1 (walking skeleton).
+"""Agent loop.
 
-Design: the loop is pluggable. M1 ships `ScriptedAgent` — deterministic slot
-filling that proves the architecture (nulls drive the interview, state is
-shared, surfaces update incrementally) with zero API dependencies, so the
-skeleton runs anywhere. M2 swaps in the Claude Agent SDK behind the same
-`respond()` interface; nothing upstream changes.
+Design: the loop is pluggable. `ScriptedAgent` is deterministic slot filling
+that proves the architecture (nulls drive the interview, state is shared,
+surfaces update incrementally) with zero API dependencies, so the app runs
+anywhere. The Claude Agent SDK slots in behind the same `respond()` interface;
+nothing upstream changes.
 
 ScriptedAgent's "NLU" is deliberately crude (keyword + number extraction).
 It is scaffolding, not the product — do not extend it; replace it.
@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import a2ui
+from . import a2ui, marketplace
 from .state import SessionStore, missing_slots
 
 SLOT_QUESTIONS = {
@@ -60,15 +60,84 @@ class ScriptedAgent:
             reply_text = SLOT_QUESTIONS[slot]
         else:
             state["interview"]["complete"] = True
-            state["phase"] = "researching"
-            reply_text = (
-                "Great — I have everything I need. "
-                "(M2 will search the marketplace here; the skeleton stops at a complete interview.)"
-            )
+            state = self.store.save(state)
+            return self._research(session_id, first_render)
 
         state = self.store.save(state)
         msgs = a2ui.interview_progress_messages(state, first_time=first_render)
         return AgentReply(text=reply_text, a2ui_messages=msgs)
+
+    # -- research step: search -> shortlist -> catalogue ----------------------
+
+    def _research(self, session_id: str, first_render: bool) -> AgentReply:
+        """Runs the deterministic half of the pipeline and renders results.
+
+        NOTE: ordering here is the shortlist score, and each card's `why` is a
+        readout of that score's breakdown. It is honest but it is NOT the LLM
+        reasoning FR-3 ultimately calls for — that arrives with the Claude Agent
+        SDK, which will re-rank these candidates and write real per-car
+        rationale into research.ranked.
+        """
+        state = self.store.get(session_id)
+        intent = state["intent"]
+        query = {
+            "mode": intent["mode"],
+            "car_type": intent["car_type"],
+            "budget_max": intent["budget"]["amount"],
+            "available": intent["target_date"],
+        }
+        state["research"]["last_query"] = query
+        state["phase"] = "researching"
+        state = self.store.save(state)
+
+        result = marketplace.search_listings(state, **query)
+        if "error" in result:
+            return AgentReply(text=result["error"]["message"])
+
+        shortlist = marketplace.shortlist_candidates(state, limit=6)
+        state = self.store.get(session_id)
+        state["research"]["shortlist"] = shortlist["shortlist"]
+        state = self.store.save(state)
+
+        cards = [self._card(s) for s in shortlist["shortlist"]]
+        msgs: list[dict[str, Any]] = []
+        if first_render:
+            msgs += a2ui.interview_progress_messages(state, first_time=True)
+        msgs += a2ui.results_messages(cards, shortlist["considered"])
+
+        if cards:
+            verb = "to rent" if intent["mode"] == "rent" else "to buy"
+            text_out = (f"Found {shortlist['considered']} {intent['car_type']} options {verb} "
+                        f"within your budget — here are the {len(cards)} strongest.")
+        else:
+            text_out = f"Nothing matched that exactly. {result.get('hint', '')}".strip()
+        return AgentReply(text=text_out, a2ui_messages=msgs)
+
+    def _card(self, scored: dict[str, Any]) -> dict[str, Any]:
+        l = marketplace.listing_by_id(scored["listing_id"])
+        per = "/day" if l["price"]["period"] == "per_day" else ""
+        b = scored["breakdown"]
+        reasons = []
+        if b["budget_fit"] >= 0.9:
+            reasons.append("uses your budget well")
+        elif b["budget_fit"] >= 0.6:
+            reasons.append("comfortably under budget")
+        if b["constraints"] == 1.0:
+            reasons.append("meets every stated requirement")
+        elif b["constraints"] >= 0.5:
+            reasons.append("meets most of your requirements")
+        if b["availability"] == 1.0:
+            reasons.append("free for your whole date range")
+        elif b["availability"] >= 0.5:
+            reasons.append("partly available in your window")
+        return {
+            "listing_id": l["listing_id"],
+            "title": f"{l['brand']} {l['model']} ({l['year']})",
+            "price": f"₹{l['price']['amount']:,}{per}",
+            "meta": f"{l['category']} · {l['fuel']} · {l['transmission']} · "
+                    f"{l['seats']} seats · {l['location']}",
+            "why": "Why: " + ("; ".join(reasons) if reasons else "closest available match"),
+        }
 
     # -- crude slot parsing (scaffolding only) --------------------------------
 
