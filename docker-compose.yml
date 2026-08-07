@@ -1,0 +1,9 @@
+services:
+  carmatch:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - carmatch-data:/data
+volumes:
+  carmatch-data:
