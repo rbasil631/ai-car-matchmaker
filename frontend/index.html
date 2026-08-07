@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>AI Car Matchmaker — M1</title>
+<title>AI Car Matchmaker</title>
 <style>
   :root { --ink:#1a1a1a; --mut:#777; --line:#e4e4e4; --acc:#1a3a8f; }
   body { font-family: system-ui, sans-serif; margin:0; background:#f7f7f5; color:var(--ink); }
@@ -22,16 +22,20 @@
   .a2-Row { display:flex; gap:14px; flex-wrap:wrap; }
   .a2-Column { display:flex; flex-direction:column; gap:2px; }
   .a2-Text-h3 { font-size:15px; font-weight:600; margin-bottom:8px; }
-  .a2-Text-caption { font-size:11px; color:var(--mut); text-transform:uppercase; letter-spacing:.04em; }
+  .a2-Text-h5 { font-size:14px; font-weight:600; }
+  .a2-Text-caption { font-size:11.5px; color:var(--mut); line-height:1.45; }
   .a2-Text-body { font-size:14px; }
   .a2-Button { padding:8px 14px; border:1px solid var(--acc); color:var(--acc); background:#fff; border-radius:8px; cursor:pointer; font-size:13px; }
   .a2-Divider { border-top:1px solid var(--line); margin:8px 0; }
+  .a2-Card { padding:10px 0; border-bottom:1px solid var(--line); }
+  .a2-Card:last-child { border-bottom:0; }
+  .a2ui-surface > .a2-Card { border-bottom:0; }
   .hint { font-size:12px; color:var(--mut); margin-top:6px; }
 </style>
 </head>
 <body>
 <div id="wrap">
-  <h1>AI Car Matchmaker <span style="color:var(--mut);font-weight:400">— M1 walking skeleton</span></h1>
+  <h1>AI Car Matchmaker</h1>
   <div id="log"></div>
   <div class="hint">Tip: type <code>/book demo-listing</code> anytime to exercise the MCP App booking form.</div>
   <div id="bar">
@@ -116,6 +120,7 @@ function renderComponent(surfaceId, id) {
     }
     case "Card": {
       const el = document.createElement("div");
+      el.className = "a2-Card";
       if (c.child) el.appendChild(renderComponent(surfaceId, c.child));
       return el;
     }
