@@ -1,0 +1,222 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>AI Car Matchmaker — M1</title>
+<style>
+  :root { --ink:#1a1a1a; --mut:#777; --line:#e4e4e4; --acc:#1a3a8f; }
+  body { font-family: system-ui, sans-serif; margin:0; background:#f7f7f5; color:var(--ink); }
+  #wrap { max-width: 760px; margin: 0 auto; padding: 16px; display:flex; flex-direction:column; height:100vh; box-sizing:border-box; }
+  h1 { font-size:16px; font-weight:600; margin:0 0 12px; }
+  #log { flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:10px; padding-bottom:12px; }
+  .msg { max-width:80%; padding:10px 14px; border-radius:12px; font-size:14px; line-height:1.5; }
+  .user { align-self:flex-end; background:var(--acc); color:#fff; }
+  .agent { align-self:flex-start; background:#fff; border:1px solid var(--line); }
+  .a2ui-surface { align-self:stretch; background:#fff; border:1px solid var(--line); border-radius:12px; padding:14px; }
+  .mcp-frame { align-self:stretch; border:1px solid var(--line); border-radius:12px; overflow:hidden; background:#fff; }
+  .mcp-frame iframe { width:100%; height:330px; border:0; display:block; }
+  #bar { display:flex; gap:8px; padding-top:10px; border-top:1px solid var(--line); }
+  #inp { flex:1; padding:10px 12px; border:1px solid var(--line); border-radius:8px; font-size:14px; }
+  #send { padding:10px 18px; border:0; border-radius:8px; background:var(--acc); color:#fff; cursor:pointer; }
+  /* A2UI component styles */
+  .a2-Row { display:flex; gap:14px; flex-wrap:wrap; }
+  .a2-Column { display:flex; flex-direction:column; gap:2px; }
+  .a2-Text-h3 { font-size:15px; font-weight:600; margin-bottom:8px; }
+  .a2-Text-caption { font-size:11px; color:var(--mut); text-transform:uppercase; letter-spacing:.04em; }
+  .a2-Text-body { font-size:14px; }
+  .a2-Button { padding:8px 14px; border:1px solid var(--acc); color:var(--acc); background:#fff; border-radius:8px; cursor:pointer; font-size:13px; }
+  .a2-Divider { border-top:1px solid var(--line); margin:8px 0; }
+  .hint { font-size:12px; color:var(--mut); margin-top:6px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>AI Car Matchmaker <span style="color:var(--mut);font-weight:400">— M1 walking skeleton</span></h1>
+  <div id="log"></div>
+  <div class="hint">Tip: type <code>/book demo-listing</code> anytime to exercise the MCP App booking form.</div>
+  <div id="bar">
+    <input id="inp" placeholder="I need a car…" autocomplete="off">
+    <button id="send">Send</button>
+  </div>
+</div>
+<script>
+/* ---------------- A2UI v0.9.1 renderer (basic-catalog subset) ----------------
+   Implements: createSurface / updateComponents / updateDataModel / deleteSurface.
+   Components: Text, Row, Column, Card, Button, Divider.
+   Data binding: {"path": "/json/pointer"} resolved against the surface data model.
+   Client->server events use the spec action shape:
+   {name, surfaceId, sourceComponentId, timestamp, context}.                    */
+const surfaces = {};   // surfaceId -> {components: Map, dataModel: {}, el: HTMLElement}
+
+function a2uiHandle(msg) {
+  if (msg.createSurface) {
+    const { surfaceId } = msg.createSurface;
+    const el = document.createElement("div");
+    el.className = "a2ui-surface";
+    log().appendChild(el);
+    surfaces[surfaceId] = { components: new Map(), dataModel: {}, el };
+  } else if (msg.updateComponents) {
+    const { surfaceId, components } = msg.updateComponents;
+    const s = surfaces[surfaceId]; if (!s) return;
+    for (const c of components) s.components.set(c.id, c);
+    renderSurface(surfaceId);
+  } else if (msg.updateDataModel) {
+    const { surfaceId, path, value } = msg.updateDataModel;
+    const s = surfaces[surfaceId]; if (!s) return;
+    if (!path || path === "/") s.dataModel = value;
+    else setByPointer(s.dataModel, path, value);
+    renderSurface(surfaceId);
+  } else if (msg.deleteSurface) {
+    const s = surfaces[msg.deleteSurface.surfaceId];
+    if (s) { s.el.remove(); delete surfaces[msg.deleteSurface.surfaceId]; }
+  }
+}
+
+function renderSurface(surfaceId) {
+  const s = surfaces[surfaceId];
+  const rootId = findRoot(s.components);
+  s.el.replaceChildren(rootId ? renderComponent(surfaceId, rootId) : document.createTextNode(""));
+}
+
+function findRoot(components) {
+  const referenced = new Set();
+  for (const c of components.values()) {
+    for (const id of (c.children || [])) referenced.add(id);
+    if (c.child) referenced.add(c.child);
+  }
+  for (const id of components.keys()) if (!referenced.has(id)) return id;
+  return null;
+}
+
+function resolveDynamic(surfaceId, v) {
+  if (v && typeof v === "object" && v.path) {
+    const parts = v.path.split("/").filter(Boolean);
+    let cur = surfaces[surfaceId].dataModel;
+    for (const p of parts) { if (cur == null) return ""; cur = cur[p]; }
+    return cur ?? "";
+  }
+  return v;
+}
+
+function renderComponent(surfaceId, id) {
+  const c = surfaces[surfaceId].components.get(id);
+  if (!c) return document.createTextNode("");
+  switch (c.component) {
+    case "Text": {
+      const el = document.createElement("div");
+      el.className = "a2-Text-" + (c.variant || "body");
+      el.textContent = resolveDynamic(surfaceId, c.text);
+      return el;
+    }
+    case "Row": case "Column": {
+      const el = document.createElement("div");
+      el.className = "a2-" + c.component;
+      for (const child of (c.children || [])) el.appendChild(renderComponent(surfaceId, child));
+      return el;
+    }
+    case "Card": {
+      const el = document.createElement("div");
+      if (c.child) el.appendChild(renderComponent(surfaceId, c.child));
+      return el;
+    }
+    case "Button": {
+      const el = document.createElement("button");
+      el.className = "a2-Button";
+      if (c.child) el.appendChild(renderComponent(surfaceId, c.child));
+      el.onclick = () => sendFrame({ type: "a2ui_action", action: {
+        name: c.action?.event?.name, surfaceId, sourceComponentId: id,
+        timestamp: new Date().toISOString(),
+        context: Object.fromEntries(Object.entries(c.action?.event?.context || {})
+          .map(([k, v]) => [k, resolveDynamic(surfaceId, v)]))
+      }});
+      return el;
+    }
+    case "Divider": { const el = document.createElement("div"); el.className = "a2-Divider"; return el; }
+    default: {
+      const el = document.createElement("div");
+      el.textContent = "[unsupported component: " + c.component + "]";
+      return el;
+    }
+  }
+}
+
+function setByPointer(obj, pointer, value) {
+  const parts = pointer.split("/").filter(Boolean);
+  let cur = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (!(parts[i] in cur)) cur[parts[i]] = {};
+    cur = cur[parts[i]];
+  }
+  cur[parts[parts.length - 1]] = value;
+}
+
+/* ---------------- MCP Apps host (sandboxed iframe + JSON-RPC relay) --------- */
+let activeApp = null; // { iframe, toolResult }
+
+function mountMcpApp({ resource_uri, html, tool_result }) {
+  const holder = document.createElement("div");
+  holder.className = "mcp-frame";
+  const iframe = document.createElement("iframe");
+  iframe.sandbox = "allow-scripts";               // mandatory sandboxing per spec
+  iframe.srcdoc = html;
+  holder.appendChild(iframe);
+  log().appendChild(holder);
+  activeApp = { iframe, toolResult: tool_result };
+  iframe.addEventListener("load", () => {
+    // host -> iframe: deliver tool result data as a notification
+    iframe.contentWindow.postMessage(
+      { jsonrpc: "2.0", method: "notifications/tool-result", params: tool_result }, "*");
+  });
+  scroll();
+}
+
+window.addEventListener("message", (ev) => {
+  // iframe -> host: relay JSON-RPC tools/call to the backend over the websocket
+  const msg = ev.data;
+  if (activeApp && ev.source === activeApp.iframe.contentWindow &&
+      msg && msg.jsonrpc === "2.0" && msg.method === "tools/call") {
+    sendFrame({ type: "mcp_tool_call", request: msg });
+  }
+});
+
+/* ---------------- chat plumbing --------------------------------------------- */
+const sessionId = localStorage.getItem("carmatch-session") ||
+  (() => { const s = crypto.randomUUID(); localStorage.setItem("carmatch-session", s); return s; })();
+const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/" + sessionId;
+let sock = new WebSocket(wsUrl);
+
+sock.onmessage = (ev) => {
+  const frame = JSON.parse(ev.data);
+  if (frame.type === "agent_text") addMsg(frame.text, "agent");
+  else if (frame.type === "a2ui") a2uiHandle(frame.message);
+  else if (frame.type === "mcp_app") mountMcpApp(frame);
+  else if (frame.type === "mcp_tool_result") {
+    if (activeApp) activeApp.iframe.contentWindow.postMessage(frame.response, "*");
+  }
+  scroll();
+};
+sock.onopen = () => addMsg("Hi! I'm your car matchmaker. Tell me what you're looking for.", "agent");
+
+function log() { return document.getElementById("log"); }
+function scroll() { const l = log(); l.scrollTop = l.scrollHeight; }
+function addMsg(text, who) {
+  const el = document.createElement("div");
+  el.className = "msg " + who;
+  el.textContent = text;
+  log().appendChild(el);
+  scroll();
+}
+function sendFrame(obj) { sock.send(JSON.stringify(obj)); }
+function submit() {
+  const inp = document.getElementById("inp");
+  const text = inp.value.trim();
+  if (!text) return;
+  addMsg(text, "user");
+  sendFrame({ type: "user_message", text });
+  inp.value = "";
+}
+document.getElementById("send").onclick = submit;
+document.getElementById("inp").addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+</script>
+</body>
+</html>
