@@ -12,3 +12,4 @@ build/
 .langfuse/
 .pytest_cache/
 .ruff_cache/
+research/a2ui-schemas/
