@@ -108,7 +108,16 @@ def test_envelopes_validate_against_real_spec():
         )
     main = json.loads((SPEC / "server_to_client.json").read_text())
     validator = jsonschema.Draft202012Validator(main, registry=registry)
-    for m in a2ui.interview_progress_messages(new_session_state(), first_time=True):
+
+    messages = list(a2ui.interview_progress_messages(new_session_state(), first_time=True))
+    # the catalogue surface must be spec-valid too, not just the interview one
+    messages += a2ui.results_messages(
+        [{"listing_id": "l-001", "title": "Tata Nexon (2024)", "price": "\u20b91,200,000",
+          "meta": "Compact SUV \u00b7 petrol \u00b7 automatic \u00b7 5 seats \u00b7 Delhi",
+          "why": "Why: uses your budget well"}],
+        considered=12,
+    )
+    for m in messages:
         validator.validate(m)
 
 
