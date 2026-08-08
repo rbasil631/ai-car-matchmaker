@@ -173,8 +173,10 @@ def summarize(session_id: str) -> dict[str, Any]:
         if s["name"] == "agent_rank" and s["output"]:
             n = s["output"].get("ranked")
             if n:
-                narrowing = f"{narrowing}, model ranked those {n}" if narrowing \\
-                    else f"model ranked {n}"
+                if narrowing:
+                    narrowing = f"{narrowing}, model ranked those {n}"
+                else:
+                    narrowing = f"model ranked {n}"
     return {
         "session_id": session_id,
         "span_count": len(spans),
