@@ -16,9 +16,9 @@ User ⇄ A2UI renderer ⇄ Agent loop ⇄ Session state
 
 - **Agent loop, not a pipeline.** Search, shortlist, and compare are tools the agent calls *repeatedly* as the user revises constraints ("actually, under ₹15 lakh", "anything hybrid?").
 - **Session state is shared, not a stage.** Every tool reads and writes one versioned session object — the payment app knows the budget the interview captured.
-- **Two UI paradigms, one surface.** A2UI renders agent-driven dynamic UI (interview progress, catalogue, compare table, reasoning steps). MCP Apps render the two mandatory server-owned interfaces: booking form and mock payment.
+- **Two UI paradigms, one surface.** A2UI renders agent-driven dynamic UI (interview progress, catalogue, garage, live compare table). MCP Apps render the two mandatory server-owned interfaces: booking form and mock payment.
 - **Hybrid ranking.** Deterministic filter + score narrows the marketplace to a shortlist of ≤10; the agent ranks and explains those. The explanations are real reasoning, not post-hoc narration.
-- **Compare/hold garage.** Users hold multiple cars, compare them side by side, and take one through checkout at a time.
+- **Compare/hold garage.** Users hold multiple cars, compare them side by side, and take one through checkout at a time. The comparison is a *view* over the held set — narrowing what you look at never discards what you saved.
 
 ## Running
 
@@ -50,11 +50,13 @@ cd backend && python -m pytest tests/
 
 ## Status
 
-✅ **M1 — walking skeleton.** Chat loop, versioned session state, interview driven by unfilled intent slots, live A2UI progress surface, and an MCP App booking form in a sandboxed iframe with a JSON-RPC `tools/call` round trip. Type `/book demo-listing` to exercise the MCP App path.
+✅ **M1 — walking skeleton.** Chat loop, versioned session state, interview driven by unfilled intent slots, live A2UI progress surface, and an MCP App booking form in a sandboxed iframe with a JSON-RPC `tools/call` round trip.
 
-✅ **M2 — marketplace (partial).** Seeded generator producing 388 listings across 12 categories with ≥10 brands in every category, a validator enforcing the FR-6 floor, `search_listings` (pure filter, returns a relaxation hint instead of dead-ending on zero results) and `shortlist_candidates` (deterministic scoring with a per-candidate breakdown). A completed interview now runs search → shortlist and renders a ranked A2UI catalogue.
+✅ **M2 — marketplace.** Seeded generator producing 388 listings across 12 categories with ≥10 brands in every category, a validator enforcing the FR-6 floor, `search_listings` (pure filter, returns a relaxation hint instead of dead-ending on zero results) and `shortlist_candidates` (deterministic scoring with a per-candidate breakdown). A completed interview runs search → shortlist and renders a ranked A2UI catalogue.
 
-🚧 **Next.** Swap `ScriptedAgent` for the Claude Agent SDK so ranking and per-car rationale come from the model rather than a score readout (the deterministic shortlist stays — that split is the point). Then M3 garage/compare, M4 payment MCP App, M5 observability + ship.
+✅ **M3 — garage & compare.** `hold_car` / `release_car` / `compare_cars`. Holds carry a note derived from the shortlist ("cheapest on the shortlist", "only one free for the full date range") and survive constraint revisions. The comparison table is built from nested Row/Column with `weight` — the basic catalog has no Table component — and updates live as cars enter and leave the comparison. Releasing a car cascades out of the comparison so no stale column can linger.
+
+🚧 **Next.** M4 checkout: wire `open_booking_form` to a held car (retiring the `/book demo-listing` stub) and add the mock payment MCP App with its decline path. Then the Claude Agent SDK swap so ranking and per-car rationale come from the model rather than a score readout (the deterministic shortlist stays — that split is the point), and M5 observability + ship.
 
 Milestones: [`plan.md §5`](specs/001-car-matchmaker/plan.md).
 
@@ -74,10 +76,11 @@ This project is built spec-first (GitHub spec-kit conventions). The spec artifac
 
 | Requirement | Where |
 |---|---|
-| Interactive in-UI interview | Agent loop, interview phase (spec FR-1) — **live** |
+| Interactive in-UI interview | Agent loop, interview phase (FR-1) — **live** |
 | Research + ranked, explained suggestions | `search_listings` + `shortlist_candidates` + agent ranking (FR-2, FR-3) — **deterministic half live** |
 | **MCP Apps: form filling + mock payment (mandatory)** | `open_booking_form` (**live**) and `open_payment` (contracts §5, §6) |
-| Dynamic UI via A2UI | A2UI v0.9.1 renderer, envelopes spec-schema-validated in tests — **live** |
+| Dynamic UI via A2UI | A2UI v0.9.1 renderer — interview, catalogue, garage, compare table; every envelope spec-schema-validated in tests — **live** |
+| Hold, annotate, compare side by side | `hold_car` / `release_car` / `compare_cars` (FR-4) — **live** |
 | Mock marketplace ≥100 listings / ≥10 categories / ≥10 brands per category | `data/generate_listings.py` + `data/validate_listings.py` — **live (388 / 12 / ≥10)** |
 | Multistep agent memory | Versioned session state (data-model.md) — **live** |
 | Agent harness | Claude Agent SDK (plan §2) |
