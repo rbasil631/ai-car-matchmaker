@@ -1,0 +1,5 @@
+# Optional: enables Claude Agent SDK ranking (FR-3).
+# The wheel bundles the Claude Code CLI binary (~286 MB installed), so it is
+# kept out of the base image. Install it, set ANTHROPIC_API_KEY, and the agent
+# re-ranks the deterministic shortlist with real per-car reasoning.
+claude-agent-sdk>=0.2.134
