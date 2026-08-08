@@ -14,7 +14,7 @@
   .agent { align-self:flex-start; background:#fff; border:1px solid var(--line); }
   .a2ui-surface { align-self:stretch; background:#fff; border:1px solid var(--line); border-radius:12px; padding:14px; }
   .mcp-frame { align-self:stretch; border:1px solid var(--line); border-radius:12px; overflow:hidden; background:#fff; }
-  .mcp-frame iframe { width:100%; height:330px; border:0; display:block; }
+  .mcp-frame iframe { width:100%; height:360px; border:0; display:block; }
   #bar { display:flex; gap:8px; padding-top:10px; border-top:1px solid var(--line); }
   #inp { flex:1; padding:10px 12px; border:1px solid var(--line); border-radius:8px; font-size:14px; }
   #send { padding:10px 18px; border:0; border-radius:8px; background:var(--acc); color:#fff; cursor:pointer; }
@@ -37,7 +37,6 @@
 <div id="wrap">
   <h1>AI Car Matchmaker</h1>
   <div id="log"></div>
-  <div class="hint">Tip: type <code>/book demo-listing</code> anytime to exercise the MCP App booking form.</div>
   <div id="bar">
     <input id="inp" placeholder="I need a car…" autocomplete="off">
     <button id="send">Send</button>
@@ -168,7 +167,7 @@ function setByPointer(obj, pointer, value) {
 }
 
 /* ---------------- MCP Apps host (sandboxed iframe + JSON-RPC relay) --------- */
-let activeApp = null; // { iframe, toolResult }
+const mountedApps = [];   // several apps can appear over one conversation
 
 function mountMcpApp({ resource_uri, html, tool_result }) {
   const holder = document.createElement("div");
@@ -178,7 +177,7 @@ function mountMcpApp({ resource_uri, html, tool_result }) {
   iframe.srcdoc = html;
   holder.appendChild(iframe);
   log().appendChild(holder);
-  activeApp = { iframe, toolResult: tool_result };
+  mountedApps.push(iframe);
   iframe.addEventListener("load", () => {
     // host -> iframe: deliver tool result data as a notification
     iframe.contentWindow.postMessage(
@@ -190,8 +189,8 @@ function mountMcpApp({ resource_uri, html, tool_result }) {
 window.addEventListener("message", (ev) => {
   // iframe -> host: relay JSON-RPC tools/call to the backend over the websocket
   const msg = ev.data;
-  if (activeApp && ev.source === activeApp.iframe.contentWindow &&
-      msg && msg.jsonrpc === "2.0" && msg.method === "tools/call") {
+  const known = mountedApps.some((f) => f.contentWindow === ev.source);
+  if (known && msg && msg.jsonrpc === "2.0" && msg.method === "tools/call") {
     sendFrame({ type: "mcp_tool_call", request: msg });
   }
 });
@@ -208,7 +207,9 @@ sock.onmessage = (ev) => {
   else if (frame.type === "a2ui") a2uiHandle(frame.message);
   else if (frame.type === "mcp_app") mountMcpApp(frame);
   else if (frame.type === "mcp_tool_result") {
-    if (activeApp) activeApp.iframe.contentWindow.postMessage(frame.response, "*");
+    // replies go to the newest app — the one that just issued the call
+    const target = mountedApps[mountedApps.length - 1];
+    if (target) target.contentWindow.postMessage(frame.response, "*");
   }
   scroll();
 };
