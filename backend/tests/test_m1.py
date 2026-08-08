@@ -117,6 +117,18 @@ def test_envelopes_validate_against_real_spec():
           "why": "Why: uses your budget well"}],
         considered=12,
     )
+    # garage + compare surfaces must be spec-valid too (weight, nested Row/Column)
+    messages += a2ui.garage_messages([
+        {"listing_id": "l-001", "title": "Tata Nexon (2024)", "price": "\u20b91,200,000",
+         "note": "cheapest on the shortlist", "in_compare": True},
+    ])
+    messages += a2ui.compare_messages({
+        "columns": [{"listing_id": "l-001", "title": "Tata Nexon"},
+                    {"listing_id": "l-002", "title": "Kia Sonet"}],
+        "rows": [{"label": "Price", "values": ["\u20b91,200,000", "\u20b91,100,000"]},
+                 {"label": "Seats", "values": ["5", "5"]}],
+    })
+    messages += a2ui.clear_compare_messages()
     for m in messages:
         validator.validate(m)
 
