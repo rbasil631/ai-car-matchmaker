@@ -138,7 +138,7 @@ def interview_progress_messages(state: dict[str, Any], first_time: bool) -> list
     slots = {
         "mode": intent["mode"] or "…",
         "use_case": intent["use_case"] or "…",
-        "car_type": intent["car_type"] or "…",
+        "car_type": intent["car_type"] or _slot_placeholder(state, "car_type"),
         "budget": (
             f"₹{intent['budget']['amount']:,} {intent['budget']['period']}"
             if intent["budget"]["amount"]
@@ -289,6 +289,12 @@ def compare_messages(matrix: dict[str, Any]) -> list[dict[str, Any]]:
 def clear_compare_messages() -> list[dict[str, Any]]:
     """Fewer than two cars selected — the table has nothing to say."""
     return [delete_surface(COMPARE_SURFACE)]
+
+
+def _slot_placeholder(state: dict[str, Any], slot: str) -> str:
+    """A declined slot reads as 'any', not as a still-pending ellipsis."""
+    declined = (state.get("interview") or {}).get("declined") or []
+    return "any" if slot in declined else "…"
 
 
 def _fmt_date(value: Any) -> str:
