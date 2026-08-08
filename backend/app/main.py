@@ -20,6 +20,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 
 from . import checkout as checkout_tools
+from . import tracing
 from .agent import ScriptedAgent
 from .mcp_app import TOOLS, read_resource
 from .state import SessionStore
@@ -40,6 +41,17 @@ def index() -> FileResponse:
 @app.get("/healthz")
 def healthz() -> dict:
     return {"ok": True}
+
+
+@app.get("/trace/{session_id}")
+def trace(session_id: str) -> JSONResponse:
+    """The session's spans, oldest first, plus a digest.
+
+    Served locally so the two-step ranking is inspectable without a Langfuse
+    account — see app/tracing.py.
+    """
+    return JSONResponse({"summary": tracing.summarize(session_id),
+                         "spans": tracing.get_trace(session_id)})
 
 
 @app.get("/mcp/tools")
@@ -101,11 +113,17 @@ async def _handle_mcp_tool_call(websocket: WebSocket, session_id: str, request: 
     state = store.get(session_id)
 
     if name == "submit_booking_form":
-        result = checkout_tools.submit_booking_form(
-            state, args.get("listing_id"), args.get("form_data", {}))
+        with tracing.span(session_id, name, kind="tool",
+                          input={"listing_id": args.get("listing_id")}) as sp:
+            result = checkout_tools.submit_booking_form(
+                state, args.get("listing_id"), args.get("form_data", {}))
+            sp["output"] = {"ok": "error" not in result}
     elif name == "submit_payment":
-        # only the last four digits are ever sent by the iframe
-        result = checkout_tools.submit_payment(state, args.get("card_last4", ""))
+        # only the last four digits are ever sent by the iframe, and the
+        # tracer redacts even those
+        with tracing.span(session_id, name, kind="tool") as sp:
+            result = checkout_tools.submit_payment(state, args.get("card_last4", ""))
+            sp["output"] = {"status": result.get("status", "error")}
     else:
         await websocket.send_json({"type": "mcp_tool_result", "response": {
             "jsonrpc": "2.0", "id": request.get("id"),
