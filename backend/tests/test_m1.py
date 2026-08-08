@@ -2,7 +2,7 @@
 
 Covers: state versioning + optimistic concurrency, nulls-drive-the-interview,
 A2UI envelope validity (against the real v0.9.1 spec schemas when available),
-and the websocket chat + MCP App round trip end-to-end.
+and the websocket chat + MCP descriptor shapes.
 """
 import json
 from pathlib import Path
@@ -121,6 +121,8 @@ def test_envelopes_validate_against_real_spec():
     messages += a2ui.garage_messages([
         {"listing_id": "l-001", "title": "Tata Nexon (2024)", "price": "\u20b91,200,000",
          "note": "cheapest on the shortlist", "in_compare": True},
+        {"listing_id": "l-002", "title": "Kia Sonet (2025)", "price": "\u20b91,100,000",
+         "note": "", "in_compare": False, "booked": True, "confirmation_id": "c-abc12345"},
     ])
     messages += a2ui.compare_messages({
         "columns": [{"listing_id": "l-001", "title": "Tata Nexon"},
@@ -135,7 +137,12 @@ def test_envelopes_validate_against_real_spec():
 
 # ---- end-to-end over the websocket ---------------------------------------------
 
-def test_ws_chat_and_mcp_app_roundtrip(tmp_path, monkeypatch):
+def test_ws_chat_and_mcp_descriptors(tmp_path, monkeypatch):
+    """Chat plumbing + MCP descriptor/resource shapes.
+
+    The full booking->payment round trip is exercised in test_m4.py, which owns
+    the checkout flow; this keeps the skeleton test to the skeleton.
+    """
     monkeypatch.setenv("CARMATCH_DB", str(tmp_path / "e2e.sqlite"))
     import importlib
     from app import main as main_mod
@@ -144,36 +151,20 @@ def test_ws_chat_and_mcp_app_roundtrip(tmp_path, monkeypatch):
     client = TestClient(main_mod.app)
     with client.websocket_connect("/ws/e2e-1") as ws:
         assert ws.receive_json()["type"] == "state"
-
         ws.send_text(json.dumps({"type": "user_message", "text": "hello"}))
         frames = [ws.receive_json() for _ in range(5)]
         types = [f["type"] for f in frames]
-        assert types.count("a2ui") == 3 and "agent_text" in types
+        assert types.count("a2ui") == 3 and "agent_text" in types and "state" in types
 
-        # MCP App path: open form, submit, verify state written
-        ws.send_text(json.dumps({"type": "user_message", "text": "/book demo-listing"}))
-        app_frame = ws.receive_json()
-        assert app_frame["type"] == "mcp_app"
-        assert app_frame["resource_uri"] == "ui://car-matchmaker/booking-form"
-        ws.receive_json()  # agent_text
+    # both mandatory apps are declared, with the NON-deprecated linkage key
+    tools = {t["name"]: t for t in client.get("/mcp/tools").json()["tools"]}
+    assert set(tools) == {"open_booking_form", "open_payment"}
+    for t in tools.values():
+        assert t["_meta"]["ui"]["resourceUri"].startswith("ui://car-matchmaker/")
+        assert "ui/resourceUri" not in t["_meta"]
 
-        ws.send_text(json.dumps({"type": "mcp_tool_call", "request": {
-            "jsonrpc": "2.0", "id": 7, "method": "tools/call",
-            "params": {"name": "submit_booking_form", "arguments": {
-                "session_id": "e2e-1", "listing_id": "l-demo",
-                "form_data": {"name": "Riya", "phone": "9", "date": "2026-09-10"}}}}}))
-        result = ws.receive_json()
-        assert result["type"] == "mcp_tool_result"
-        assert result["response"]["result"]["ok"] is True
-        ws.receive_json()  # agent_text
-        state = ws.receive_json()["state"]
-        assert state["checkout"]["form_data"]["name"] == "Riya"
-        assert state["phase"] == "booking"
+    for uri in ("ui://car-matchmaker/booking-form", "ui://car-matchmaker/mock-payment"):
+        res = client.get("/mcp/resource", params={"uri": uri}).json()
+        assert res["contents"][0]["mimeType"] == "text/html;profile=mcp-app"
 
-    # tool descriptor uses the NON-deprecated linkage key
-    tools = client.get("/mcp/tools").json()["tools"]
-    assert tools[0]["_meta"]["ui"]["resourceUri"] == "ui://car-matchmaker/booking-form"
-    assert "ui/resourceUri" not in tools[0]["_meta"]
-
-    res = client.get("/mcp/resource", params={"uri": "ui://car-matchmaker/booking-form"}).json()
-    assert res["contents"][0]["mimeType"] == "text/html;profile=mcp-app"
+    assert client.get("/mcp/resource", params={"uri": "ui://nope"}).status_code == 404
