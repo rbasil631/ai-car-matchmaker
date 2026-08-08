@@ -15,7 +15,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import a2ui, garage, marketplace
+from . import a2ui, checkout, garage, marketplace
+from .mcp_app import BOOKING_FORM_URI, PAYMENT_URI, read_resource
 from .state import SessionStore, missing_slots
 
 SLOT_QUESTIONS = {
@@ -33,6 +34,7 @@ class AgentReply:
 
     text: str
     a2ui_messages: list[dict[str, Any]] = field(default_factory=list)
+    mcp_app: dict[str, Any] | None = None   # {resource_uri, html, tool_result}
 
 
 class ScriptedAgent:
@@ -142,7 +144,7 @@ class ScriptedAgent:
             "held": l["listing_id"] in (held_ids or set()),
         }
 
-    # -- A2UI action dispatch (garage / compare) -----------------------------
+    # -- A2UI action dispatch (garage / compare / checkout) -------------------
 
     def handle_action(self, session_id: str, action: dict[str, Any]) -> AgentReply:
         """Route a client->server A2UI event to the matching tool.
@@ -156,6 +158,7 @@ class ScriptedAgent:
             "hold_car": self._act_hold,
             "release_car": self._act_release,
             "toggle_compare": self._act_toggle_compare,
+            "book_car": self._act_book,
         }
         handler = handlers.get(name)
         if handler is None:
@@ -226,6 +229,46 @@ class ScriptedAgent:
             text="Pick at least two cars to see them side by side.",
             a2ui_messages=msgs)
 
+    def _act_book(self, session_id: str, listing_id: str) -> AgentReply:
+        state = self.store.get(session_id)
+        prefill = checkout.open_booking_form(state, listing_id)
+        if "error" in prefill:
+            return AgentReply(text=prefill["error"]["message"])
+        listing = marketplace.listing_by_id(listing_id)
+        return AgentReply(
+            text=f"Let's book the {listing['brand']} {listing['model']} — "
+                 "fill in your details below.",
+            mcp_app=_mcp_app(BOOKING_FORM_URI, prefill))
+
+    # -- checkout continuations (driven by MCP App tool calls) ----------------
+
+    def after_booking_form(self, session_id: str) -> AgentReply:
+        """Booking details captured -> hand straight to the payment app."""
+        state = self.store.get(session_id)
+        prefill = checkout.open_payment(state)
+        if "error" in prefill:
+            return AgentReply(text=prefill["error"]["message"])
+        return AgentReply(
+            text=f"Details saved. Total {prefill['amount_label']} — "
+                 "payment is mocked, nothing is charged.",
+            mcp_app=_mcp_app(PAYMENT_URI, prefill))
+
+    def after_payment(self, session_id: str, result: dict[str, Any]) -> AgentReply:
+        state = self.store.get(session_id)
+        if result.get("status") != "confirmed":
+            return AgentReply(text="That card was declined — try another one.")
+        listing = marketplace.listing_by_id(result["listing_id"])
+        msgs = self._garage_and_compare_messages(state)
+        remaining = [h for h in state["garage"]["held"]
+                     if h["listing_id"] not in
+                     {c["listing_id"] for c in state["checkout"]["completed"]}]
+        tail = (f" You still have {len(remaining)} car(s) held if you want to book "
+                "another." if remaining else "")
+        return AgentReply(
+            text=f"Booked — {listing['brand']} {listing['model']} for "
+                 f"₹{result['amount']:,}. Confirmation {result['confirmation_id']}.{tail}",
+            a2ui_messages=msgs)
+
     # -- surface refreshes ----------------------------------------------------
 
     def _garage_and_compare_messages(self, state: dict[str, Any],
@@ -236,12 +279,16 @@ class ScriptedAgent:
         for h in state["garage"]["held"]:
             l = marketplace.listing_by_id(h["listing_id"])
             per = "/day" if l["price"]["period"] == "per_day" else ""
+            booking = next((c for c in state["checkout"]["completed"]
+                            if c["listing_id"] == h["listing_id"]), None)
             entries.append({
                 "listing_id": h["listing_id"],
                 "title": f"{l['brand']} {l['model']} ({l['year']})",
                 "price": f"₹{l['price']['amount']:,}{per}",
                 "note": h.get("note", ""),
                 "in_compare": h["listing_id"] in compare_ids,
+                "booked": booking is not None,
+                "confirmation_id": booking["confirmation_id"] if booking else None,
             })
         msgs = a2ui.garage_messages(entries)
         if matrix is not None:
@@ -313,3 +360,11 @@ def _parse_amount(text: str) -> int | None:
     elif unit == "k":
         num *= 1_000
     return int(num) if num > 0 else None
+
+
+def _mcp_app(uri: str, tool_result: dict[str, Any]) -> dict[str, Any]:
+    """Package a UI resource + its data for the host to mount in an iframe."""
+    resource = read_resource(uri)
+    return {"resource_uri": uri,
+            "html": resource["contents"][0]["text"],
+            "tool_result": tool_result}
