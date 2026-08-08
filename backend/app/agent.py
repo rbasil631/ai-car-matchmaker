@@ -1,21 +1,20 @@
 """Agent loop.
 
-Design: the loop is pluggable. `ScriptedAgent` is deterministic slot filling
-that proves the architecture (nulls drive the interview, state is shared,
-surfaces update incrementally) with zero API dependencies, so the app runs
-anywhere. The Claude Agent SDK slots in behind the same `respond()` interface;
-nothing upstream changes.
+Design: the loop is pluggable. `ScriptedAgent` handles the interview with
+deterministic slot filling — no API dependency, so the app runs anywhere — and
+delegates ranking to the Claude Agent SDK when it is configured.
 
-ScriptedAgent's "NLU" is deliberately crude (keyword + number extraction).
-It is scaffolding, not the product — do not extend it; replace it.
+ScriptedAgent's interview "NLU" is deliberately crude (keyword + number
+extraction). It is scaffolding, not the product.
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import a2ui, checkout, garage, marketplace
+from . import a2ui, checkout, garage, llm_ranker, marketplace
 from .mcp_app import BOOKING_FORM_URI, PAYMENT_URI, read_resource
 from .state import SessionStore, missing_slots
 
@@ -69,16 +68,19 @@ class ScriptedAgent:
         msgs = a2ui.interview_progress_messages(state, first_time=first_render)
         return AgentReply(text=reply_text, a2ui_messages=msgs)
 
-    # -- research step: search -> shortlist -> catalogue ----------------------
+    # -- research step: search -> shortlist -> rank -> catalogue --------------
 
     def _research(self, session_id: str, first_render: bool) -> AgentReply:
-        """Runs the deterministic half of the pipeline and renders results.
+        """Both halves of the hybrid ranking (plan §4).
 
-        NOTE: ordering here is the shortlist score, and each card's `why` is a
-        readout of that score's breakdown. It is honest but it is NOT the LLM
-        reasoning FR-3 ultimately calls for — that arrives with the Claude Agent
-        SDK, which will re-rank these candidates and write real per-car
-        rationale into research.ranked.
+        Deterministic code filters and scores; the agent then re-ranks those
+        candidates and writes real per-car reasoning into research.ranked.
+        The two steps stay separate so the trace shows "code narrowed 388→6,
+        model ranked those 6" as distinct, auditable moves.
+
+        If the model is unavailable or its answer fails grounding checks, the
+        deterministic order stands and the cards fall back to score-derived
+        explanations. Degraded, never wrong.
         """
         state = self.store.get(session_id)
         intent = state["intent"]
@@ -101,8 +103,17 @@ class ScriptedAgent:
         state["research"]["shortlist"] = shortlist["shortlist"]
         state = self.store.save(state)
 
+        ranked = self._rank(state, shortlist["shortlist"])
+        if ranked:
+            state = self.store.get(session_id)
+            state["research"]["ranked"] = ranked
+            state = self.store.save(state)
+
+        ordered = self._apply_ranking(shortlist["shortlist"], ranked)
         held_ids = {h["listing_id"] for h in state["garage"]["held"]}
-        cards = [self._card(s, held_ids) for s in shortlist["shortlist"]]
+        reasons = {r["listing_id"]: r["reasoning"] for r in (ranked or [])}
+        cards = [self._card(s, held_ids, reasons.get(s["listing_id"]))
+                 for s in ordered]
         msgs: list[dict[str, Any]] = []
         if first_render:
             msgs += a2ui.interview_progress_messages(state, first_time=True)
@@ -116,8 +127,38 @@ class ScriptedAgent:
             text_out = f"Nothing matched that exactly. {result.get('hint', '')}".strip()
         return AgentReply(text=text_out, a2ui_messages=msgs)
 
+    def _rank(self, state: dict[str, Any],
+              shortlist: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+        """Bridge the async SDK call into this synchronous turn.
+
+        Checks for a running loop BEFORE building the coroutine — constructing
+        it first and letting asyncio.run() reject it leaves an un-awaited
+        coroutine behind (a RuntimeWarning and a real leak under ASGI).
+        """
+        def run() -> list[dict[str, Any]] | None:
+            return asyncio.run(llm_ranker.rank_shortlist(state, shortlist))
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return run()                     # no loop: safe to run inline
+
+        import concurrent.futures            # inside ASGI: use a worker thread
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(run).result()
+
+    @staticmethod
+    def _apply_ranking(shortlist: list[dict[str, Any]],
+                       ranked: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        if not ranked:
+            return shortlist
+        by_id = {s["listing_id"]: s for s in shortlist}
+        return [by_id[r["listing_id"]] for r in ranked if r["listing_id"] in by_id]
+
     def _card(self, scored: dict[str, Any],
-              held_ids: set[str] | None = None) -> dict[str, Any]:
+              held_ids: set[str] | None = None,
+              reasoning: str | None = None) -> dict[str, Any]:
         l = marketplace.listing_by_id(scored["listing_id"])
         per = "/day" if l["price"]["period"] == "per_day" else ""
         b = scored["breakdown"]
@@ -140,7 +181,9 @@ class ScriptedAgent:
             "price": f"₹{l['price']['amount']:,}{per}",
             "meta": f"{l['category']} · {l['fuel']} · {l['transmission']} · "
                     f"{l['seats']} seats · {l['location']}",
-            "why": "Why: " + ("; ".join(reasons) if reasons else "closest available match"),
+            # model reasoning when we have it; score readout otherwise
+            "why": "Why: " + (reasoning or
+                              ("; ".join(reasons) if reasons else "closest available match")),
             "held": l["listing_id"] in (held_ids or set()),
         }
 
@@ -307,7 +350,10 @@ class ScriptedAgent:
         if not shortlist:
             return []
         held_ids = {h["listing_id"] for h in state["garage"]["held"]}
-        cards = [self._card(s, held_ids) for s in shortlist]
+        reasons = {r["listing_id"]: r["reasoning"]
+                   for r in (state["research"].get("ranked") or [])}
+        cards = [self._card(s, held_ids, reasons.get(s["listing_id"]))
+                 for s in shortlist]
         return a2ui.results_messages(cards, len(shortlist))
 
     # -- crude slot parsing (scaffolding only) --------------------------------
