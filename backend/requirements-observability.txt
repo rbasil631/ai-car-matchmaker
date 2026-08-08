@@ -1,0 +1,4 @@
+# Optional: ships the local trace spans to a hosted Langfuse project.
+# Without this the in-memory buffer at GET /trace/{session_id} still works,
+# so the two-step ranking is inspectable with no account and no network.
+langfuse>=4.14
