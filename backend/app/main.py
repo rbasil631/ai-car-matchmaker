@@ -1,4 +1,4 @@
-"""M1 backend: chat websocket + A2UI stream + MCP App resource endpoints.
+"""Backend: chat websocket + A2UI stream + MCP App resource endpoints.
 
 Wire protocol to the frontend (one websocket, JSON frames):
   client -> server: {"type": "user_message", "text": ...}
@@ -26,7 +26,7 @@ from .state import SessionStore
 DB_PATH = os.environ.get("CARMATCH_DB", "carmatch.sqlite")
 FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
 
-app = FastAPI(title="AI Car Matchmaker — M1 skeleton")
+app = FastAPI(title="AI Car Matchmaker")
 store = SessionStore(DB_PATH)
 agent = ScriptedAgent(store)
 
@@ -38,7 +38,7 @@ def index() -> FileResponse:
 
 @app.get("/healthz")
 def healthz() -> dict:
-    return {"ok": True, "milestone": "M1"}
+    return {"ok": True}
 
 
 @app.get("/mcp/tools")
@@ -68,7 +68,8 @@ async def ws(websocket: WebSocket, session_id: str) -> None:
             if kind == "user_message":
                 text = frame.get("text", "")
                 if text.strip().lower() == "/book demo-listing":
-                    # M1 shortcut to exercise the MCP App path before M2-M3 exist.
+                    # shortcut that exercises the MCP App path before M4 wires
+                    # checkout to a held car
                     await _open_booking_form(websocket, session_id, "l-demo")
                     continue
                 reply = agent.respond(session_id, text)
@@ -78,12 +79,13 @@ async def ws(websocket: WebSocket, session_id: str) -> None:
                 await websocket.send_json({"type": "state", "state": store.get(session_id)})
 
             elif kind == "a2ui_action":
-                # A2UI client->server event {name, surfaceId, sourceComponentId, timestamp, context}
-                action = frame.get("action", {})
-                reply = agent.respond(session_id, action.get("context", {}).get("value", ""))
+                # A2UI client->server event: {name, surfaceId, sourceComponentId,
+                # timestamp, context}. Button actions carry listing_id in context.
+                reply = agent.handle_action(session_id, frame.get("action", {}))
                 for msg in reply.a2ui_messages:
                     await websocket.send_json({"type": "a2ui", "message": msg})
                 await websocket.send_json({"type": "agent_text", "text": reply.text})
+                await websocket.send_json({"type": "state", "state": store.get(session_id)})
 
             elif kind == "mcp_tool_call":
                 await _handle_mcp_tool_call(websocket, session_id, frame.get("request", {}))
