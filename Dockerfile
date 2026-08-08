@@ -4,6 +4,7 @@ COPY backend/requirements.txt backend/requirements.txt
 RUN pip install --no-cache-dir -r backend/requirements.txt
 COPY backend/ backend/
 COPY frontend/ frontend/
+COPY data/ data/
 ENV CARMATCH_DB=/data/carmatch.sqlite
 VOLUME /data
 EXPOSE 8000
