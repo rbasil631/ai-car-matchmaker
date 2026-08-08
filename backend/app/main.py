@@ -12,6 +12,7 @@ Wire protocol to the frontend (one websocket, JSON frames):
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -79,7 +80,8 @@ async def ws(websocket: WebSocket, session_id: str) -> None:
             kind = frame.get("type")
 
             if kind == "user_message":
-                reply = agent.respond(session_id, frame.get("text", ""))
+                reply = await _respond_streaming(websocket, session_id,
+                                                 frame.get("text", ""))
                 await _emit(websocket, session_id, reply)
 
             elif kind == "a2ui_action":
@@ -93,6 +95,42 @@ async def ws(websocket: WebSocket, session_id: str) -> None:
 
     except WebSocketDisconnect:
         return
+
+
+async def _respond_streaming(websocket: WebSocket, session_id: str, text: str):
+    """Run one agent turn on a worker thread, streaming its A2UI frames.
+
+    The agent is synchronous, so calling it directly would block the event loop
+    and the "progress" frames would all land at once when the work finished —
+    which is not progress. Running it off-thread and handing frames back through
+    a queue means the ticker actually ticks while the model is thinking.
+    """
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def emit(frames: list[dict]) -> None:
+        # called from the worker thread
+        loop.call_soon_threadsafe(queue.put_nowait, frames)
+
+    task = loop.run_in_executor(
+        None, lambda: agent.respond(session_id, text, emit=emit))
+
+    while True:
+        drain = asyncio.ensure_future(queue.get())
+        done, _ = await asyncio.wait({task, drain},
+                                     return_when=asyncio.FIRST_COMPLETED)
+        if drain in done:
+            for msg in drain.result():
+                await websocket.send_json({"type": "a2ui", "message": msg})
+            continue
+        drain.cancel()
+        break
+
+    # anything queued between the last drain and the turn finishing
+    while not queue.empty():
+        for msg in queue.get_nowait():
+            await websocket.send_json({"type": "a2ui", "message": msg})
+    return await task
 
 
 async def _emit(websocket: WebSocket, session_id: str, reply) -> None:
