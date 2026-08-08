@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import a2ui, checkout, garage, llm_ranker, marketplace
+from . import a2ui, checkout, garage, llm_ranker, marketplace, tracing
 from .mcp_app import BOOKING_FORM_URI, PAYMENT_URI, read_resource
 from .state import SessionStore, missing_slots
 
@@ -94,16 +94,34 @@ class ScriptedAgent:
         state["phase"] = "researching"
         state = self.store.save(state)
 
-        result = marketplace.search_listings(state, **query)
+        with tracing.span(session_id, "search_listings", kind="tool",
+                          input=query) as sp:
+            result = marketplace.search_listings(state, **query)
+            sp["output"] = {"count": result.get("count"),
+                            "hint": result.get("hint")}
         if "error" in result:
             return AgentReply(text=result["error"]["message"])
 
-        shortlist = marketplace.shortlist_candidates(state, limit=6)
+        with tracing.span(session_id, "shortlist_candidates", kind="tool",
+                          input={"limit": 6}) as sp:
+            shortlist = marketplace.shortlist_candidates(state, limit=6)
+            sp["output"] = {"considered": shortlist["considered"],
+                            "kept": len(shortlist["shortlist"]),
+                            "top": [c["listing_id"] for c in shortlist["shortlist"]]}
         state = self.store.get(session_id)
         state["research"]["shortlist"] = shortlist["shortlist"]
         state = self.store.save(state)
 
-        ranked = self._rank(state, shortlist["shortlist"])
+        # The model step is traced separately from the deterministic one on
+        # purpose: the split IS the auditability claim (plan §4).
+        with tracing.span(session_id, "agent_rank", kind="generation",
+                          input={"candidates": [c["listing_id"]
+                                                for c in shortlist["shortlist"]]},
+                          metadata={"model": llm_ranker.MODEL}) as sp:
+            ranked = self._rank(state, shortlist["shortlist"])
+            sp["output"] = {"ranked": len(ranked) if ranked else 0,
+                            "order": [r["listing_id"] for r in (ranked or [])],
+                            "fell_back": ranked is None}
         if ranked:
             state = self.store.get(session_id)
             state["research"]["ranked"] = ranked
@@ -208,7 +226,11 @@ class ScriptedAgent:
             return AgentReply(text=f"I don't know how to handle '{name}'.")
         if not listing_id:
             return AgentReply(text="That action arrived without a car attached.")
-        return handler(session_id, listing_id)
+        with tracing.span(session_id, name, kind="tool",
+                          input={"listing_id": listing_id}) as sp:
+            reply = handler(session_id, listing_id)
+            sp["output"] = {"text": reply.text}
+        return reply
 
     def _act_hold(self, session_id: str, listing_id: str) -> AgentReply:
         state = self.store.get(session_id)
