@@ -19,8 +19,9 @@ from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 
+from . import checkout as checkout_tools
 from .agent import ScriptedAgent
-from .mcp_app import BOOKING_FORM_URI, BOOKING_TOOL, read_resource
+from .mcp_app import TOOLS, read_resource
 from .state import SessionStore
 
 DB_PATH = os.environ.get("CARMATCH_DB", "carmatch.sqlite")
@@ -44,7 +45,7 @@ def healthz() -> dict:
 @app.get("/mcp/tools")
 def mcp_tools() -> JSONResponse:
     """tools/list shape — descriptors carry _meta.ui.resourceUri per spec."""
-    return JSONResponse({"tools": [BOOKING_TOOL]})
+    return JSONResponse({"tools": TOOLS})
 
 
 @app.get("/mcp/resource")
@@ -66,26 +67,14 @@ async def ws(websocket: WebSocket, session_id: str) -> None:
             kind = frame.get("type")
 
             if kind == "user_message":
-                text = frame.get("text", "")
-                if text.strip().lower() == "/book demo-listing":
-                    # shortcut that exercises the MCP App path before M4 wires
-                    # checkout to a held car
-                    await _open_booking_form(websocket, session_id, "l-demo")
-                    continue
-                reply = agent.respond(session_id, text)
-                for msg in reply.a2ui_messages:
-                    await websocket.send_json({"type": "a2ui", "message": msg})
-                await websocket.send_json({"type": "agent_text", "text": reply.text})
-                await websocket.send_json({"type": "state", "state": store.get(session_id)})
+                reply = agent.respond(session_id, frame.get("text", ""))
+                await _emit(websocket, session_id, reply)
 
             elif kind == "a2ui_action":
                 # A2UI client->server event: {name, surfaceId, sourceComponentId,
                 # timestamp, context}. Button actions carry listing_id in context.
                 reply = agent.handle_action(session_id, frame.get("action", {}))
-                for msg in reply.a2ui_messages:
-                    await websocket.send_json({"type": "a2ui", "message": msg})
-                await websocket.send_json({"type": "agent_text", "text": reply.text})
-                await websocket.send_json({"type": "state", "state": store.get(session_id)})
+                await _emit(websocket, session_id, reply)
 
             elif kind == "mcp_tool_call":
                 await _handle_mcp_tool_call(websocket, session_id, frame.get("request", {}))
@@ -94,70 +83,47 @@ async def ws(websocket: WebSocket, session_id: str) -> None:
         return
 
 
-async def _open_booking_form(websocket: WebSocket, session_id: str, listing_id: str) -> None:
-    resource = read_resource(BOOKING_FORM_URI)
-    state = store.get(session_id) or store.create(session_id)
-    prefill_date = None
-    td = state["intent"]["target_date"]
-    if isinstance(td, dict):
-        prefill_date = td.get("from")
-    elif isinstance(td, str):
-        prefill_date = td
-    await websocket.send_json(
-        {
-            "type": "mcp_app",
-            "resource_uri": BOOKING_FORM_URI,
-            "html": resource["contents"][0]["text"],
-            "tool_result": {
-                "session_id": session_id,
-                "listing_id": listing_id,
-                "prefill_date": prefill_date,
-            },
-        }
-    )
-    await websocket.send_json(
-        {"type": "agent_text", "text": "Here's the booking form — fill it in right here."}
-    )
+async def _emit(websocket: WebSocket, session_id: str, reply) -> None:
+    """Send one agent turn: A2UI envelopes, prose, any MCP App, then state."""
+    for msg in reply.a2ui_messages:
+        await websocket.send_json({"type": "a2ui", "message": msg})
+    await websocket.send_json({"type": "agent_text", "text": reply.text})
+    if reply.mcp_app:
+        await websocket.send_json({"type": "mcp_app", **reply.mcp_app})
+    await websocket.send_json({"type": "state", "state": store.get(session_id)})
 
 
 async def _handle_mcp_tool_call(websocket: WebSocket, session_id: str, request: dict) -> None:
-    """JSON-RPC tools/call relayed from the iframe by the host."""
+    """JSON-RPC tools/call relayed from an MCP App iframe by the host."""
     params = request.get("params", {})
-    if params.get("name") == "submit_booking_form":
-        args = params.get("arguments", {})
-        state = store.get(session_id)
-        state["checkout"]["form_data"] = args.get("form_data", {})
-        state["checkout"]["active_listing_id"] = args.get("listing_id")
-        state["phase"] = "booking"
-        state = store.save(state)
-        await websocket.send_json(
-            {
-                "type": "mcp_tool_result",
-                "response": {
-                    "jsonrpc": "2.0",
-                    "id": request.get("id"),
-                    "result": {"ok": True, "version": state["version"]},
-                },
-            }
-        )
-        await websocket.send_json(
-            {
-                "type": "agent_text",
-                "text": (
-                    f"Details saved for {args.get('listing_id')} — "
-                    "next step would be payment (lands in M4)."
-                ),
-            }
-        )
-        await websocket.send_json({"type": "state", "state": state})
+    name = params.get("name")
+    args = params.get("arguments", {})
+    state = store.get(session_id)
+
+    if name == "submit_booking_form":
+        result = checkout_tools.submit_booking_form(
+            state, args.get("listing_id"), args.get("form_data", {}))
+    elif name == "submit_payment":
+        # only the last four digits are ever sent by the iframe
+        result = checkout_tools.submit_payment(state, args.get("card_last4", ""))
     else:
-        await websocket.send_json(
-            {
-                "type": "mcp_tool_result",
-                "response": {
-                    "jsonrpc": "2.0",
-                    "id": request.get("id"),
-                    "error": {"code": -32601, "message": "unknown tool"},
-                },
-            }
-        )
+        await websocket.send_json({"type": "mcp_tool_result", "response": {
+            "jsonrpc": "2.0", "id": request.get("id"),
+            "error": {"code": -32601, "message": f"unknown tool {name}"}}})
+        return
+
+    if "error" in result:
+        # surfaced inside the iframe so the user fixes it in place
+        await websocket.send_json({"type": "mcp_tool_result", "response": {
+            "jsonrpc": "2.0", "id": request.get("id"),
+            "error": {"code": -32602, "message": result["error"]["message"]}}})
+        return
+
+    state = store.save(state)
+    await websocket.send_json({"type": "mcp_tool_result", "response": {
+        "jsonrpc": "2.0", "id": request.get("id"),
+        "result": {**result, "version": state["version"]}}})
+
+    follow_up = (agent.after_booking_form(session_id) if name == "submit_booking_form"
+                 else agent.after_payment(session_id, result))
+    await _emit(websocket, session_id, follow_up)
