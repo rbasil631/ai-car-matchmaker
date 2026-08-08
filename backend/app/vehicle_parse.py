@@ -209,15 +209,19 @@ def parse_constraints(text: str) -> list[str]:
         if token not in found:
             found.append(token)
 
-    # seats — "7 seater", "seven-seater", "seats 7", "room for 7"
-    m = re.search(r"\b(\d{1,2})\s*(?:seater|seat|seats)\b", norm)
+    # seats — "7 seater", "seven-seater", "seats 7", "room for 7",
+    # and the way people actually say it: "for 7 people", "6 of us"
+    _SEAT_NOUNS = r"(?:seater|seats?|people|persons?|passengers?|of us)"
+    m = re.search(rf"\b(\d{{1,2}})\s*{_SEAT_NOUNS}\b", norm)
     if not m:
-        m = re.search(r"\b(?:seats|seat|room for|fits)\s*(\d{1,2})\b", norm)
+        m = re.search(r"\b(?:seats|seat|room for|fits|space for)\s*(\d{1,2})\b", norm)
     if m:
-        add(f"seats>={int(m.group(1))}")
+        seats = int(m.group(1))
+        if 2 <= seats <= 12:            # ignore stray numbers like years
+            add(f"seats>={seats}")
     else:
         for word, n in _WORD_NUMBERS.items():
-            if re.search(rf"\b{word}\s*(?:seater|seat|seats)\b", norm):
+            if re.search(rf"\b{word}\s*{_SEAT_NOUNS}\b", norm):
                 add(f"seats>={n}")
                 break
 
