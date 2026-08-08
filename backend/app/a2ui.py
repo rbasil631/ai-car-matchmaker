@@ -190,6 +190,102 @@ def results_messages(cards: list[dict[str, Any]], considered: int) -> list[dict[
     ]
 
 
+RESEARCH_SURFACE = "research-progress"
+
+RESEARCH_STEPS = ("search", "score", "rank")
+STEP_LABELS = {
+    "search": "Searching the marketplace",
+    "score": "Scoring against your requirements",
+    "rank": "Ranking the finalists",
+}
+
+
+def research_progress_messages(steps: dict[str, str], first_time: bool,
+                               detail: dict[str, str] | None = None
+                               ) -> list[dict[str, Any]]:
+    """Live research progress (FR-2 / requirement 11).
+
+    Built the way A2UI is designed to be used: the structure is sent once, then
+    each step transition is a single `updateDataModel` against a JSON pointer.
+    Re-sending the whole component list on every tick would work too, and would
+    waste the protocol's entire point.
+
+    `steps` maps step -> "pending" | "running" | "done".
+    """
+    msgs: list[dict[str, Any]] = []
+    if first_time:
+        components: list[dict[str, Any]] = []
+        rows: list[str] = []
+        for step in RESEARCH_STEPS:
+            mark, label, note = f"rp-{step}-mark", f"rp-{step}-lbl", f"rp-{step}-note"
+            components.append(text(mark, {"path": f"/steps/{step}"}, weight=1))
+            components.append(text(label, STEP_LABELS[step], weight=6))
+            components.append(text(note, {"path": f"/detail/{step}"},
+                                   variant="caption", weight=5))
+            components.append(row(f"rp-{step}", [mark, label, note]))
+            rows.append(f"rp-{step}")
+        components.append(text("rp-title", "Working on it", variant="h3"))
+        components.append(column("rp-list", rows))
+        components.append(column("rp-root", ["rp-title", "rp-list"]))
+        msgs.append(create_surface(RESEARCH_SURFACE))
+        msgs.append(update_components(RESEARCH_SURFACE, components))
+
+    marks = {step: _STEP_MARKS.get(steps.get(step, "pending"), "\u25cb")
+             for step in RESEARCH_STEPS}
+    msgs.append(update_data_model(
+        RESEARCH_SURFACE,
+        {"steps": marks, "detail": {s: (detail or {}).get(s, "") for s in RESEARCH_STEPS}},
+    ))
+    return msgs
+
+
+_STEP_MARKS = {"pending": "\u25cb", "running": "\u25d0", "done": "\u25cf"}
+
+
+def clear_research_progress() -> list[dict[str, Any]]:
+    """The results replace the progress list once the work is finished."""
+    return [delete_surface(RESEARCH_SURFACE)]
+
+
+CONFIRMATION_SURFACE = "confirmation"
+
+
+def confirmation_messages(booking: dict[str, Any]) -> list[dict[str, Any]]:
+    """Booked state as its own surface (requirement 13).
+
+    A confirmation buried inside a garage row is easy to miss; this is the one
+    thing the user came for, so it gets its own card.
+    """
+    components: list[dict[str, Any]] = []
+    fields = [
+        ("Car", booking["title"]),
+        ("Confirmation", booking["confirmation_id"]),
+        ("Total paid", booking["amount"]),
+        ("When", booking.get("when") or "\u2014"),
+        ("Pickup", booking.get("location") or "\u2014"),
+    ]
+    rows: list[str] = []
+    for i, (label, value) in enumerate(fields):
+        lbl, val = f"cf-{i}-lbl", f"cf-{i}-val"
+        components.append(text(lbl, label, variant="caption", weight=2))
+        components.append(text(val, str(value), weight=5))
+        components.append(row(f"cf-{i}", [lbl, val]))
+        rows.append(f"cf-{i}")
+
+    components.append(text("cf-title", "Booking confirmed", variant="h3"))
+    components.append(text("cf-note",
+                           "Mock booking \u2014 no payment was taken.",
+                           variant="caption"))
+    components.append(column("cf-list", rows))
+    components.append(column("cf-root", ["cf-title", "cf-list", "cf-note"]))
+    components.append(card("cf-card", "cf-root"))
+    return [
+        delete_surface(CONFIRMATION_SURFACE),
+        create_surface(CONFIRMATION_SURFACE),
+        update_components(CONFIRMATION_SURFACE, components),
+    ]
+
+
 GARAGE_SURFACE = "garage"
 COMPARE_SURFACE = "compare"
 
