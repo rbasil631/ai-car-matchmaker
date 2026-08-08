@@ -32,7 +32,7 @@ def new_session_state(session_id: str | None = None) -> dict[str, Any]:
             "target_date": None,
             "constraints": [],
         },
-        "interview": {"asked": [], "complete": False},
+        "interview": {"asked": [], "attempts": {}, "declined": [], "complete": False},
         "research": {"last_query": {}, "shortlist": [], "ranked": []},
         "garage": {"held": [], "compare_ids": []},
         "checkout": {
@@ -45,11 +45,25 @@ def new_session_state(session_id: str | None = None) -> dict[str, Any]:
     }
 
 
+MAX_SLOT_ATTEMPTS = 2
+
+
 def missing_slots(state: dict[str, Any]) -> list[str]:
-    """Which required intent slots are still unfilled. This IS the interview logic."""
+    """Which required intent slots are still unfilled. This IS the interview logic.
+
+    A slot the user has been asked about `MAX_SLOT_ATTEMPTS` times without a
+    usable answer is treated as declined and stops being requested. Otherwise
+    an unparseable reply traps the conversation on one question forever — and
+    the downstream tools already handle a null field by simply not filtering
+    on it, which is the right outcome for "no preference".
+    """
     intent = state["intent"]
+    interview = state.get("interview", {})
+    declined = set(interview.get("declined", []))
     missing = []
     for slot in REQUIRED_INTENT_SLOTS:
+        if slot in declined:
+            continue
         value = intent[slot]
         if slot == "budget":
             if value.get("amount") is None:
@@ -57,6 +71,17 @@ def missing_slots(state: dict[str, Any]) -> list[str]:
         elif value is None:
             missing.append(slot)
     return missing
+
+
+def record_attempt(state: dict[str, Any], slot: str) -> None:
+    """Count an ask, and mark the slot declined once it has been asked enough."""
+    interview = state["interview"]
+    attempts = interview.setdefault("attempts", {})
+    attempts[slot] = attempts.get(slot, 0) + 1
+    if attempts[slot] >= MAX_SLOT_ATTEMPTS:
+        declined = interview.setdefault("declined", [])
+        if slot not in declined:
+            declined.append(slot)
 
 
 class StaleWriteError(Exception):
