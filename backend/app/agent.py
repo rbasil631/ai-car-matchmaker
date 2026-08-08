@@ -1,11 +1,14 @@
 """Agent loop.
 
-Design: the loop is pluggable. `ScriptedAgent` handles the interview with
-deterministic slot filling — no API dependency, so the app runs anywhere — and
-delegates ranking to the Claude Agent SDK when it is configured.
+The loop runs the interview with deterministic slot filling — no API dependency,
+so the app works for anyone who clones it — and delegates ranking to the Claude
+Agent SDK when it is configured.
 
-ScriptedAgent's interview "NLU" is deliberately crude (keyword + number
-extraction). It is scaffolding, not the product.
+Slot filling reads answers through `vehicle_parse`, which resolves category
+aliases, model names and requirement phrases against the dataset's own
+vocabulary. A slot that cannot be parsed is left null and re-asked once with a
+more specific prompt, then treated as "no preference" rather than trapping the
+conversation on one question.
 """
 from __future__ import annotations
 
@@ -14,9 +17,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import a2ui, checkout, garage, llm_ranker, marketplace, tracing
+from . import (a2ui, checkout, garage, llm_ranker, marketplace, tracing,
+               vehicle_parse)
 from .mcp_app import BOOKING_FORM_URI, PAYMENT_URI, read_resource
-from .state import SessionStore, missing_slots
+from .state import SessionStore, missing_slots, record_attempt
 
 SLOT_QUESTIONS = {
     "mode": "Are you looking to buy a car, or rent one?",
@@ -24,6 +28,17 @@ SLOT_QUESTIONS = {
     "car_type": "Any preference on type — SUV, sedan, hatchback, something else?",
     "budget": "What's your budget? (total if buying, per day if renting)",
     "target_date": "When do you need it by? (a date, or a from–to range for rentals)",
+}
+
+
+SLOT_RETRIES = {
+    "mode": "Just so I search the right inventory — buying, or renting?",
+    "use_case": "Even roughly — city driving, family trips, something else?",
+    "car_type": ("I didn't catch a type. Try one of: hatchback, sedan, compact SUV, "
+                 "SUV, MUV, luxury sedan, luxury SUV, electric, coupe, convertible, "
+                 "pickup, van — or say 'any'."),
+    "budget": "A rough number is fine — e.g. '12 lakh' to buy or '3000 a day' to rent.",
+    "target_date": "A single date, or a range like 2026-09-10 to 2026-09-15.",
 }
 
 
@@ -37,8 +52,8 @@ class AgentReply:
 
 
 class ScriptedAgent:
-    """Offline interview agent. Asks for the first missing intent slot;
-    parses the user's answer into state; renders progress via A2UI."""
+    """Runs the interview, then research. Asks for the first missing intent
+    slot, parses the answer into state, and renders progress via A2UI."""
 
     def __init__(self, store: SessionStore) -> None:
         self.store = store
@@ -56,9 +71,19 @@ class ScriptedAgent:
         missing = missing_slots(state)
         if missing:
             slot = missing[0]
-            if slot not in state["interview"]["asked"]:
+            asked_before = slot in state["interview"]["asked"]
+            if not asked_before:
                 state["interview"]["asked"].append(slot)
-            reply_text = SLOT_QUESTIONS[slot]
+            record_attempt(state, slot)
+            # Re-asking verbatim is how a user gets stuck; on the retry, say
+            # what a usable answer looks like.
+            reply_text = (SLOT_RETRIES.get(slot, SLOT_QUESTIONS[slot])
+                          if asked_before else SLOT_QUESTIONS[slot])
+            if not missing_slots(state):
+                # that ask exhausted the slot's attempts — move straight on
+                state["interview"]["complete"] = True
+                state = self.store.save(state)
+                return self._research(session_id, first_render)
         else:
             state["interview"]["complete"] = True
             state = self.store.save(state)
@@ -139,7 +164,10 @@ class ScriptedAgent:
 
         if cards:
             verb = "to rent" if intent["mode"] == "rent" else "to buy"
-            text_out = (f"Found {shortlist['considered']} {intent['car_type']} options {verb} "
+            # car_type is null when the user had no preference — don't render
+            # the word "None" at them
+            kind = f"{intent['car_type']} " if intent["car_type"] else ""
+            text_out = (f"Found {shortlist['considered']} {kind}options {verb} "
                         f"within your budget — here are the {len(cards)} strongest.")
         else:
             text_out = f"Nothing matched that exactly. {result.get('hint', '')}".strip()
@@ -378,26 +406,38 @@ class ScriptedAgent:
                  for s in shortlist]
         return a2ui.results_messages(cards, len(shortlist))
 
-    # -- crude slot parsing (scaffolding only) --------------------------------
+    # -- slot parsing (delegates to vehicle_parse) ----------------------------
 
     def _fill_slot(self, state: dict[str, Any], slot: str, answer: str) -> None:
         intent = state["intent"]
         low = answer.lower()
+
+        # Requirements can surface in any answer ("a 7-seater for the family"),
+        # not only when a requirement was asked for. The shortlist has always
+        # scored intent.constraints; until now nothing populated them.
+        for token in vehicle_parse.parse_constraints(answer):
+            if token not in intent["constraints"]:
+                intent["constraints"].append(token)
+
         if slot == "mode":
-            if "rent" in low:
-                intent["mode"] = "rent"
-                intent["budget"]["period"] = "per_day"
-            elif "buy" in low or "purchase" in low:
-                intent["mode"] = "buy"
-                intent["budget"]["period"] = "total"
+            mode = vehicle_parse.parse_mode(answer)
+            if mode:
+                intent["mode"] = mode
+                intent["budget"]["period"] = "per_day" if mode == "rent" else "total"
         elif slot == "use_case":
             intent["use_case"] = answer.strip()
+            # a stated use case often implies a type; only a hint, never
+            # overriding an explicit answer later
+            if not intent["car_type"]:
+                inferred = vehicle_parse.parse_car_type(answer)
+                if inferred:
+                    intent["car_type"] = inferred
         elif slot == "car_type":
-            for t in ("suv", "sedan", "hatchback", "muv", "coupe", "convertible", "pickup", "van", "ev", "luxury"):
-                if t in low:
-                    intent["car_type"] = t.upper() if t in ("suv", "muv", "ev") else t.capitalize()
-                    return
-            intent["car_type"] = answer.strip()
+            parsed = vehicle_parse.parse_car_type(answer)
+            # An unrecognised type is left null on purpose: the interview then
+            # re-asks rather than searching a category that does not exist.
+            if parsed:
+                intent["car_type"] = parsed
         elif slot == "budget":
             amount = _parse_amount(low)
             if amount:
