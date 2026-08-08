@@ -55,18 +55,28 @@ def delete_surface(surface_id: str) -> dict[str, Any]:
 # ---- components (flat list entries) ----------------------------------------
 
 
-def text(cid: str, value: Any, variant: str = "body") -> dict[str, Any]:
+def text(cid: str, value: Any, variant: str = "body",
+         weight: float | None = None) -> dict[str, Any]:
     """`value` is a literal str or a data binding like {"path": "/x"}.
     variant per catalog enum: h1..h5 | caption | body."""
-    return {"id": cid, "component": "Text", "text": value, "variant": variant}
+    c = {"id": cid, "component": "Text", "text": value, "variant": variant}
+    if weight is not None:
+        c["weight"] = weight       # only valid directly inside a Row/Column
+    return c
 
 
-def column(cid: str, children: list[str]) -> dict[str, Any]:
-    return {"id": cid, "component": "Column", "children": children}
+def column(cid: str, children: list[str], weight: float | None = None) -> dict[str, Any]:
+    c = {"id": cid, "component": "Column", "children": children}
+    if weight is not None:
+        c["weight"] = weight
+    return c
 
 
-def row(cid: str, children: list[str]) -> dict[str, Any]:
-    return {"id": cid, "component": "Row", "children": children}
+def row(cid: str, children: list[str], weight: float | None = None) -> dict[str, Any]:
+    c = {"id": cid, "component": "Row", "children": children}
+    if weight is not None:
+        c["weight"] = weight
+    return c
 
 
 def card(cid: str, child: str) -> dict[str, Any]:
@@ -147,7 +157,7 @@ def results_messages(cards: list[dict[str, Any]], considered: int) -> list[dict[
     """Catalogue surface (FR-8). Rebuilt per search: a revised query is a new
     result set, and deleteSurface + createSurface is the spec's way to say that.
 
-    Each card is {listing_id, title, price, meta, why} — `why` is the score
+    Each card is {listing_id, title, price, meta, why, held} — `why` is the score
     rationale, so the reasoning the user sees is the reasoning that ranked it.
     """
     components: list[dict[str, Any]] = []
@@ -158,7 +168,12 @@ def results_messages(cards: list[dict[str, Any]], considered: int) -> list[dict[
         components.append(text(p, c["price"], variant="body"))
         components.append(text(m, c["meta"], variant="caption"))
         components.append(text(w, c["why"], variant="caption"))
-        components.append(column(f"c{i}-col", [t, p, m, w]))
+        # hold action: the card is the entry point to the garage (FR-4)
+        lbl, btn = f"c{i}-hold-lbl", f"c{i}-hold"
+        components.append(text(lbl, "Held ✓" if c.get("held") else "Hold"))
+        components.append(button(btn, lbl, "hold_car",
+                                 {"listing_id": c["listing_id"]}))
+        components.append(column(f"c{i}-col", [t, p, m, w, btn]))
         components.append(card(f"c{i}", f"c{i}-col"))
         card_ids.append(f"c{i}")
 
@@ -173,6 +188,95 @@ def results_messages(cards: list[dict[str, Any]], considered: int) -> list[dict[
         create_surface(RESULTS_SURFACE),
         update_components(RESULTS_SURFACE, components),
     ]
+
+
+GARAGE_SURFACE = "garage"
+COMPARE_SURFACE = "compare"
+
+
+def garage_messages(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The held set (FR-4). Each entry is
+    {listing_id, title, price, note, in_compare} and renders with two actions:
+    toggle-compare and release. Rebuilt whenever the garage changes.
+    """
+    components: list[dict[str, Any]] = []
+    rows: list[str] = []
+    for i, e in enumerate(entries):
+        t, p, n = f"g{i}-title", f"g{i}-price", f"g{i}-note"
+        cmp_lbl, rel_lbl = f"g{i}-cmp-lbl", f"g{i}-rel-lbl"
+        cmp_btn, rel_btn = f"g{i}-cmp", f"g{i}-rel"
+        components.append(text(t, e["title"], variant="h5"))
+        components.append(text(p, e["price"]))
+        components.append(text(n, e["note"] or "—", variant="caption"))
+        components.append(column(f"g{i}-info", [t, p, n], weight=3))
+        components.append(text(cmp_lbl,
+                               "In comparison" if e["in_compare"] else "Compare"))
+        components.append(button(cmp_btn, cmp_lbl, "toggle_compare",
+                                 {"listing_id": e["listing_id"]}))
+        components.append(text(rel_lbl, "Release"))
+        components.append(button(rel_btn, rel_lbl, "release_car",
+                                 {"listing_id": e["listing_id"]}))
+        components.append(column(f"g{i}-actions", [cmp_btn, rel_btn], weight=1))
+        components.append(row(f"g{i}", [f"g{i}-info", f"g{i}-actions"]))
+        rows.append(f"g{i}")
+
+    heading = (f"Your garage ({len(entries)})" if entries
+               else "Your garage is empty")
+    components.append(text("gar-title", heading, variant="h3"))
+    components.append(column("gar-list", rows))
+    components.append(column("gar-root", ["gar-title", "gar-list"]))
+    return [
+        delete_surface(GARAGE_SURFACE),
+        create_surface(GARAGE_SURFACE),
+        update_components(GARAGE_SURFACE, components),
+    ]
+
+
+def compare_messages(matrix: dict[str, Any]) -> list[dict[str, Any]]:
+    """The comparison table (FR-4, acceptance check 3).
+
+    The basic catalog has no Table component, so the grid is built the way the
+    spec prescribes: a Column of Rows, each Row holding one label Column plus
+    one Column per car. `weight` keeps the label column narrow.
+    """
+    columns = matrix["columns"]
+    components: list[dict[str, Any]] = []
+
+    header_cells = ["cmp-h-label"]
+    components.append(text("cmp-h-label", "", variant="caption", weight=2))
+    for j, col in enumerate(columns):
+        cid = f"cmp-h{j}"
+        components.append(text(cid, col["title"], variant="h5", weight=3))
+        header_cells.append(cid)
+    components.append(row("cmp-header", header_cells))
+
+    row_ids = ["cmp-header"]
+    for i, r in enumerate(matrix["rows"]):
+        cells = [f"cmp-r{i}-label"]
+        components.append(text(f"cmp-r{i}-label", r["label"],
+                               variant="caption", weight=2))
+        for j, value in enumerate(r["values"]):
+            cid = f"cmp-r{i}c{j}"
+            components.append(text(cid, value, weight=3))
+            cells.append(cid)
+        components.append(row(f"cmp-r{i}", cells))
+        components.append(divider(f"cmp-d{i}"))
+        row_ids += [f"cmp-r{i}", f"cmp-d{i}"]
+
+    components.append(text("cmp-title",
+                           f"Comparing {len(columns)} cars", variant="h3"))
+    components.append(column("cmp-grid", row_ids))
+    components.append(column("cmp-root", ["cmp-title", "cmp-grid"]))
+    return [
+        delete_surface(COMPARE_SURFACE),
+        create_surface(COMPARE_SURFACE),
+        update_components(COMPARE_SURFACE, components),
+    ]
+
+
+def clear_compare_messages() -> list[dict[str, Any]]:
+    """Fewer than two cars selected — the table has nothing to say."""
+    return [delete_surface(COMPARE_SURFACE)]
 
 
 def _fmt_date(value: Any) -> str:
