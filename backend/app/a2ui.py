@@ -196,8 +196,9 @@ COMPARE_SURFACE = "compare"
 
 def garage_messages(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The held set (FR-4). Each entry is
-    {listing_id, title, price, note, in_compare} and renders with two actions:
-    toggle-compare and release. Rebuilt whenever the garage changes.
+    {listing_id, title, price, note, in_compare, booked?, confirmation_id?} and
+    renders with book / compare / release actions. Rebuilt whenever the garage
+    changes.
     """
     components: list[dict[str, Any]] = []
     rows: list[str] = []
@@ -207,7 +208,10 @@ def garage_messages(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         cmp_btn, rel_btn = f"g{i}-cmp", f"g{i}-rel"
         components.append(text(t, e["title"], variant="h5"))
         components.append(text(p, e["price"]))
-        components.append(text(n, e["note"] or "—", variant="caption"))
+        note = e["note"] or "—"
+        if e.get("booked"):
+            note = f"Booked ✓ · {e['confirmation_id']}"
+        components.append(text(n, note, variant="caption"))
         components.append(column(f"g{i}-info", [t, p, n], weight=3))
         components.append(text(cmp_lbl,
                                "In comparison" if e["in_compare"] else "Compare"))
@@ -216,7 +220,15 @@ def garage_messages(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         components.append(text(rel_lbl, "Release"))
         components.append(button(rel_btn, rel_lbl, "release_car",
                                  {"listing_id": e["listing_id"]}))
-        components.append(column(f"g{i}-actions", [cmp_btn, rel_btn], weight=1))
+        actions = [cmp_btn, rel_btn]
+        # A booked car offers no Book button — the badge in its note says why.
+        if not e.get("booked"):
+            book_lbl, book_btn = f"g{i}-book-lbl", f"g{i}-book"
+            components.append(text(book_lbl, "Book this"))
+            components.append(button(book_btn, book_lbl, "book_car",
+                                     {"listing_id": e["listing_id"]}))
+            actions.insert(0, book_btn)
+        components.append(column(f"g{i}-actions", actions, weight=1))
         components.append(row(f"g{i}", [f"g{i}-info", f"g{i}-actions"]))
         rows.append(f"g{i}")
 
